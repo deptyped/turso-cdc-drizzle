@@ -2,16 +2,16 @@
   "name": "@deptyped/turso-cdc-drizzle",
   "version": "0.1.0",
   "type": "module",
-  "main": "./dist/src/cdc/index.js",
-  "types": "./dist/src/cdc/index.d.ts",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/src/cdc/index.d.ts",
-      "import": "./dist/src/cdc/index.js"
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
     }
   },
   "files": [
-    "dist/src/cdc/"
+    "dist/src/"
   ],
   "scripts": {
     "build": "tsc",
@@ -23,12 +23,11 @@
     "drizzle-orm": "rc"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.4",
-    "@libsql/client": "^0.14.0",
+    "@biomejs/biome": "^2.0.0",
     "@tursodatabase/database": "^0.7.0",
-    "@types/node": "^22.0.0",
+    "@types/node": "^26.0.0",
     "drizzle-orm": "rc",
-    "tsx": "^4.19.0",
-    "typescript": "^5.5.0"
+    "tsx": "^4.0.0",
+    "typescript": "^7.0.0"
   }
 }
