@@ -76,6 +76,52 @@ for await (const event of streamEvents(db, users, { deleteAfterRead: true })) {
 }
 ```
 
+## Resilience
+
+### Crash recovery with checkpoint
+
+Use `CheckpointStrategy` to persist progress. The stream calls `restore` on start (if no `afterId` is given) and `save` after each batch is fully consumed. On abort, `save` fires one final time with the last yielded event's `changeId` before exit.
+
+```ts
+import type { CheckpointStrategy } from '@deptyped/turso-cdc-drizzle';
+import { sql } from 'drizzle-orm';
+
+const checkpoint: CheckpointStrategy = {
+  save: async (changeId, db) => {
+    await db.run(sql.raw(`UPDATE _cdc_cp SET change_id = ${changeId}`));
+  },
+  restore: async (db) => {
+    const row = await db.get(sql.raw("SELECT change_id FROM _cdc_cp"));
+    return row?.change_id;
+  },
+};
+
+for await (const event of streamEvents(db, users, {
+  checkpoint,
+  batchSize: 50,
+})) {
+  // process event — saved checkpoint means <50 events replay on crash
+}
+```
+
+`save` errors are silently caught — the stream continues and retries on the next batch.
+
+### Graceful shutdown
+
+Pass an `AbortSignal` to stop the stream cleanly. A final checkpoint is saved before exit.
+
+```ts
+const ac = new AbortController();
+process.on('SIGTERM', () => ac.abort());
+
+for await (const event of streamEvents(db, users, {
+  signal: ac.signal,
+  checkpoint,
+})) {
+  // the last yielded event's changeId is saved before exit
+}
+```
+
 ## API
 
 ### `enableCdc(db, mode?)`
@@ -123,6 +169,8 @@ Returns `AsyncGenerator<CdcEvent<TTable>>`. Polls every `pollIntervalMs` (defaul
 | `opts.deleteAfterRead` | `boolean` | — | Auto-delete events after yielding |
 | `opts.deleteBatchSize` | `number` | — | Batch delete every N events (requires `deleteAfterRead`) |
 | `opts.deleteBatchWaitMs` | `number` | — | Max wait before flushing a partial batch (requires `deleteBatchSize`) |
+| `opts.batchSize` | `number` | `100` | Max events per poll cycle. Also drives checkpoint cadence — checkpoint is saved after each batch. |
+| `opts.checkpoint` | `CheckpointStrategy` | — | Persistence strategy for crash recovery. See [Resilience](#resilience). |
 
 ### `deleteEvents(db, opts)`
 

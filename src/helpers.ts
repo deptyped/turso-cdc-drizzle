@@ -2,7 +2,7 @@ import type { SQL } from "drizzle-orm";
 import { and, asc, eq, getTableName, gt, gte, inArray, lt, lte, ne, sql } from "drizzle-orm";
 import { type AnySQLiteTable, blob, int, sqliteTable, text } from "drizzle-orm/sqlite-core";
 import type { TursoDatabaseDatabase } from "drizzle-orm/tursodatabase";
-import type { CdcChangeKind, CdcEvent, ChangeId } from "./types.js";
+import type { CdcChangeKind, CdcEvent, ChangeId, CheckpointStrategy } from "./types.js";
 import { assertCdcChangeKind, cdcChangeKindToInt } from "./types.js";
 
 export type CdcMode = "id" | "before" | "after" | "full";
@@ -153,6 +153,8 @@ export interface StreamEventsOptions {
   signal?: AbortSignal;
   deleteBatchSize?: number;
   deleteBatchWaitMs?: number;
+  batchSize?: number;
+  checkpoint?: CheckpointStrategy;
 }
 
 export async function* streamEvents<TTable extends AnySQLiteTable>(
@@ -161,7 +163,15 @@ export async function* streamEvents<TTable extends AnySQLiteTable>(
   opts?: StreamEventsOptions,
 ): AsyncGenerator<CdcEvent<TTable>> {
   const interval = opts?.pollIntervalMs ?? 1000;
+  const batchSize = opts?.batchSize ?? 100;
   let lastId = opts?.afterId;
+  if (lastId === undefined && opts?.checkpoint?.restore) {
+    try {
+      lastId = await opts.checkpoint.restore(db);
+    } catch {
+      // no prior checkpoint — start fresh
+    }
+  }
   const deleteAfterRead = opts?.deleteAfterRead;
   const deleteBatchSize = opts?.deleteBatchSize;
   const deleteBatchWaitMs = opts?.deleteBatchWaitMs;
@@ -169,12 +179,17 @@ export async function* streamEvents<TTable extends AnySQLiteTable>(
   let batchCount = 0;
   let lastDeleteTime = 0;
 
+  const checkpoint = opts?.checkpoint;
+
   while (true) {
     if (opts?.signal?.aborted) {
+      if (lastId !== undefined && checkpoint?.save) {
+        await checkpoint.save(lastId, db).catch(() => {});
+      }
       return;
     }
 
-    const queryOpts: GetEventsOptions = { limit: 100 };
+    const queryOpts: GetEventsOptions = { limit: batchSize };
     if (lastId !== undefined) {
       queryOpts.afterId = lastId as ChangeId;
     }
@@ -206,6 +221,10 @@ export async function* streamEvents<TTable extends AnySQLiteTable>(
       } else {
         await deleteEvents(db, { changeId: { to: lastId } });
       }
+    }
+
+    if (events.length > 0 && lastId !== undefined && checkpoint?.save) {
+      await checkpoint.save(lastId, db).catch(() => {});
     }
 
     await new Promise((resolve) => setTimeout(resolve, interval));

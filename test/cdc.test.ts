@@ -4,7 +4,8 @@ import type { InferSelectModel } from "drizzle-orm";
 import { asc } from "drizzle-orm";
 import type { TursoDatabaseDatabase } from "drizzle-orm/tursodatabase";
 import { deleteEvents, disableCdc, enableCdc, getEvents, streamEvents, tursoCdc } from "../src/helpers.ts";
-import type { CdcEvent } from "../src/types.ts";
+import type { CheckpointStrategy } from "../src/types.js";
+import type { CdcEvent, ChangeId } from "../src/types.ts";
 import { makeDb, t } from "./helpers.ts";
 
 type TursoCdcRow = InferSelectModel<typeof tursoCdc>;
@@ -323,6 +324,172 @@ test("streamEvents deleteAfterRead batched only deletes consumed events", async 
   const remaining = await capture(db);
   const dataRemaining = remaining.filter((r) => r.changeType !== 2);
   assert.equal(dataRemaining.length, 2);
+  await disableCdc(db);
+  await client.close?.();
+});
+
+test("batchSize limits events per poll loop", async () => {
+  const { client, db } = await setup();
+  await enableCdc(db);
+  for (let i = 0; i < 10; i++) await client.exec("INSERT INTO t(v) VALUES ('x')");
+  const ac = new AbortController();
+  const seen: number[] = [];
+
+  setTimeout(() => ac.abort(), 50);
+
+  for await (const event of streamEvents(db, t, {
+    batchSize: 3,
+    pollIntervalMs: 5,
+    signal: ac.signal,
+  })) {
+    seen.push(event.changeId);
+  }
+
+  assert.equal(seen.length, 10);
+  await disableCdc(db);
+  await client.close?.();
+});
+
+test("checkpoint.restore resumes stream from saved position", async () => {
+  const { client, db } = await setup();
+  await enableCdc(db);
+  await client.exec("INSERT INTO t(v) VALUES ('a')");
+  await client.exec("INSERT INTO t(v) VALUES ('b')");
+  const all = await getEvents(db, t, { limit: 100 });
+  assert.ok(all.length >= 2);
+
+  let saved: ChangeId | undefined;
+  const cp: CheckpointStrategy = {
+    save: async (id) => {
+      saved = id;
+    },
+    restore: async () => saved,
+  };
+
+  const ac = new AbortController();
+  setTimeout(() => ac.abort(), 50);
+
+  for await (const _ of streamEvents(db, t, {
+    checkpoint: cp,
+    batchSize: 2,
+    pollIntervalMs: 5,
+    signal: ac.signal,
+  })) {
+  }
+
+  const lastId = all.at(-1)!.changeId;
+  assert.ok(saved !== undefined);
+  assert.equal(saved, lastId);
+
+  await client.exec("INSERT INTO t(v) VALUES ('c')");
+
+  const ac2 = new AbortController();
+  setTimeout(() => ac2.abort(), 50);
+
+  const resumed: number[] = [];
+  for await (const event of streamEvents(db, t, {
+    checkpoint: cp,
+    batchSize: 2,
+    pollIntervalMs: 5,
+    signal: ac2.signal,
+  })) {
+    resumed.push(event.changeId);
+  }
+
+  assert.equal(resumed.length, 1);
+  await disableCdc(db);
+  await client.close?.();
+});
+
+test("checkpoint.save fires on abort", async () => {
+  const { client, db } = await setup();
+  await enableCdc(db);
+  await client.exec("INSERT INTO t(v) VALUES ('a')");
+  await client.exec("INSERT INTO t(v) VALUES ('b')");
+
+  let saved: ChangeId | undefined;
+  const cp: CheckpointStrategy = {
+    save: async (id) => {
+      saved = id;
+    },
+    restore: async () => undefined,
+  };
+
+  const ac = new AbortController();
+  setTimeout(() => ac.abort(), 50);
+
+  for await (const _ of streamEvents(db, t, {
+    checkpoint: cp,
+    batchSize: 2,
+    pollIntervalMs: 5,
+    signal: ac.signal,
+  })) {
+  }
+
+  assert.ok(saved !== undefined);
+  assert.ok(saved > 0);
+  await disableCdc(db);
+  await client.close?.();
+});
+
+test("checkpoint.save error does not crash stream", async () => {
+  const { client, db } = await setup();
+  await enableCdc(db, "full");
+  await client.exec("INSERT INTO t(v) VALUES ('a')");
+
+  const cp: CheckpointStrategy = {
+    save: async () => {
+      throw new Error("save failed");
+    },
+    restore: async () => undefined,
+  };
+
+  const ac = new AbortController();
+  setTimeout(() => ac.abort(), 50);
+
+  let yielded = false;
+  for await (const event of streamEvents(db, t, {
+    checkpoint: cp,
+    batchSize: 1,
+    pollIntervalMs: 5,
+    signal: ac.signal,
+    mode: "full",
+  })) {
+    yielded = true;
+    assert.equal(event.after?.v, "a");
+  }
+
+  assert.ok(yielded);
+  await disableCdc(db);
+  await client.close?.();
+});
+
+test("checkpoint.restore error starts fresh (no prior checkpoint)", async () => {
+  const { client, db } = await setup();
+  await enableCdc(db, "full");
+  await client.exec("INSERT INTO t(v) VALUES ('a')");
+
+  const cp: CheckpointStrategy = {
+    save: async () => {},
+    restore: async () => {
+      throw new Error("corrupted");
+    },
+  };
+
+  const ac = new AbortController();
+  setTimeout(() => ac.abort(), 50);
+
+  let count = 0;
+  for await (const _ of streamEvents(db, t, {
+    checkpoint: cp,
+    batchSize: 10,
+    pollIntervalMs: 5,
+    signal: ac.signal,
+  })) {
+    count++;
+  }
+
+  assert.equal(count, 1);
   await disableCdc(db);
   await client.close?.();
 });

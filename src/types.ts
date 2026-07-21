@@ -41,6 +41,12 @@ export function cdcChangeKindToInt(kind: CdcChangeKind): number {
 
 import type { InferSelectModel } from "drizzle-orm";
 import type { AnySQLiteTable } from "drizzle-orm/sqlite-core";
+import type { TursoDatabaseDatabase } from "drizzle-orm/tursodatabase";
+
+export interface CheckpointStrategy {
+  save: (changeId: ChangeId, db: TursoDatabaseDatabase) => Promise<void>;
+  restore: (db: TursoDatabaseDatabase) => Promise<ChangeId | undefined>;
+}
 
 export interface CdcEvent<TTable extends AnySQLiteTable = AnySQLiteTable> {
   changeId: ChangeId;

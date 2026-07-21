@@ -12,4 +12,5 @@ export {
   streamEvents,
   tursoCdc,
 } from "./helpers.js";
+export type { CheckpointStrategy } from "./types.js";
 export * from "./types.js";
