@@ -1,4 +1,4 @@
-# Drizzle ORM integration for [Turso CDC](https://docs.turso.tech/tursodb/cdc).
+# Drizzle ORM integration for [Turso CDC](https://docs.turso.tech/tursodb/cdc)
 
 [Turso CDC](https://docs.turso.tech/tursodb/cdc) tracks every INSERT, UPDATE, and DELETE in your database as events. This library exposes those events through Drizzle ORM — read them in batches, consume them as a stream, or delete them after processing. All events are typed to your Drizzle table schemas.
 
@@ -13,7 +13,7 @@ Requires `drizzle-orm` as a peer dependency.
 Imports, table schema, and database instance.
 
 ```ts
-import { drizzle } from 'drizzle-orm/tursodatabase';
+import { drizzle } from 'drizzle-orm/tursodatabase/database';
 import { sqliteTable, int, text } from 'drizzle-orm/sqlite-core';
 import { enableCdc, getEvents, streamEvents } from '@deptyped/turso-cdc-drizzle';
 
@@ -24,23 +24,26 @@ const users = sqliteTable('users', {
 
 const db = drizzle({ client });
 
-// Enable CDC — required before any event queries
+// Enable CDC (required). By default, captures only the primary key/rowid of changed rows.
 await enableCdc(db);
+
+// With row data capture:
+await enableCdc(db, 'full');
 ```
 
-One-shot query with decoded row data, filtered by kind.
+Query with decoded row data, filtered by kind.
 
 ```ts
 await db.insert(users).values({ id: 1, name: 'Alice' });
 
-const events = await getEvents(db, users, { mode: 'full', kinds: ['INSERT'], limit: 10 });
+const events = await getEvents(db, users, { mode: 'full', limit: 10 });
 // events[0]!.after — { id: 1, name: 'Alice' }
 ```
 
-One-shot with auto-delete after read.
+With auto-delete after read.
 
 ```ts
-const events = await getEvents(db, users, { mode: 'full', limit: 10, deleteAfterRead: true });
+const events = await getEvents(db, users, { deleteAfterRead: true, limit: 10 });
 // events are removed from the CDC table — next poll won't see them again
 ```
 
