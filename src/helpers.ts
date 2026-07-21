@@ -2,8 +2,8 @@ import type { SQL } from "drizzle-orm";
 import { and, asc, eq, getTableName, gt, gte, inArray, lt, lte, ne, sql } from "drizzle-orm";
 import { type AnySQLiteTable, blob, int, sqliteTable, text } from "drizzle-orm/sqlite-core";
 import type { TursoDatabaseDatabase } from "drizzle-orm/tursodatabase";
-import type { CdcChangeKind, CdcEvent, ChangeId, CheckpointStrategy } from "./types.js";
-import { assertCdcChangeKind, cdcChangeKindToInt } from "./types.js";
+import type { CdcEvent, ChangeId, CheckpointStrategy } from "./types.js";
+import { assertCdcChangeKind, CdcChangeKind, cdcChangeKindToInt } from "./types.js";
 
 export type CdcMode = "id" | "before" | "after" | "full";
 
@@ -67,9 +67,11 @@ function toCdcEvent<TTable extends AnySQLiteTable>(row: {
   after?: unknown;
   updates?: unknown;
 }): CdcEvent<TTable> {
+  if (row.changeId == null) throw new Error("CDC row missing changeId");
+  if (row.changeType == null) throw new Error("CDC row missing changeType");
   return {
-    changeId: row.changeId! as ChangeId,
-    changeType: assertCdcChangeKind(row.changeType!),
+    changeId: row.changeId as ChangeId,
+    changeType: assertCdcChangeKind(row.changeType),
     changeTime: row.changeTime,
     changeTxnId: row.changeTxnId,
     tableName: row.tableName ?? "",
@@ -96,7 +98,7 @@ export async function getEvents<TTable extends AnySQLiteTable>(
 ): Promise<CdcEvent<TTable>[]> {
   const tableName = getTableName(table);
   const conditions = [eq(tursoCdc.tableName, tableName)];
-  if (!opts?.kinds?.length) conditions.push(ne(tursoCdc.changeType, 2));
+  if (!opts?.kinds?.length) conditions.push(ne(tursoCdc.changeType, cdcChangeKindToInt(CdcChangeKind.COMMIT)));
   if (opts?.afterId !== undefined) conditions.push(gt(tursoCdc.changeId, opts.afterId));
   if (opts?.beforeId !== undefined) conditions.push(lt(tursoCdc.changeId, opts.beforeId));
   if (opts?.kinds?.length) conditions.push(inArray(tursoCdc.changeType, opts.kinds.map(cdcChangeKindToInt)));
@@ -120,8 +122,10 @@ export async function getEvents<TTable extends AnySQLiteTable>(
       .orderBy(asc(tursoCdc.changeId));
     const rows = await (opts?.limit !== undefined ? qb.limit(opts.limit) : qb);
     const events = rows.map((row) => toCdcEvent<TTable>(row));
-    if (opts?.deleteAfterRead && events.length > 0)
-      await deleteEvents(db, { changeId: { to: events.at(-1)!.changeId } });
+    if (opts?.deleteAfterRead) {
+      const last = events.at(-1);
+      if (last) await deleteEvents(db, { changeId: { to: last.changeId } });
+    }
     return events;
   }
 
@@ -139,7 +143,10 @@ export async function getEvents<TTable extends AnySQLiteTable>(
     .orderBy(asc(tursoCdc.changeId));
   const rows = await (opts?.limit !== undefined ? qb.limit(opts.limit) : qb);
   const events = rows.map((row) => toCdcEvent<TTable>(row));
-  if (opts?.deleteAfterRead && events.length > 0) await deleteEvents(db, { changeId: { to: events.at(-1)!.changeId } });
+  if (opts?.deleteAfterRead) {
+    const last = events.at(-1);
+    if (last) await deleteEvents(db, { changeId: { to: last.changeId } });
+  }
   return events;
 }
 
@@ -175,7 +182,6 @@ export async function* streamEvents<TTable extends AnySQLiteTable>(
   const deleteAfterRead = opts?.deleteAfterRead;
   const deleteBatchSize = opts?.deleteBatchSize;
   const deleteBatchWaitMs = opts?.deleteBatchWaitMs;
-  const isBatched = deleteAfterRead && deleteBatchSize !== undefined;
   let batchCount = 0;
   let lastDeleteTime = 0;
 
@@ -191,7 +197,7 @@ export async function* streamEvents<TTable extends AnySQLiteTable>(
 
     const queryOpts: GetEventsOptions = { limit: batchSize };
     if (lastId !== undefined) {
-      queryOpts.afterId = lastId as ChangeId;
+      queryOpts.afterId = lastId;
     }
     if (opts?.mode) {
       queryOpts.mode = opts.mode;
@@ -211,9 +217,9 @@ export async function* streamEvents<TTable extends AnySQLiteTable>(
     }
 
     if (deleteAfterRead && lastId !== undefined) {
-      if (isBatched) {
+      if (deleteBatchSize !== undefined) {
         const elapsed = Date.now() - lastDeleteTime;
-        if (batchCount >= deleteBatchSize! || (deleteBatchWaitMs && elapsed >= deleteBatchWaitMs)) {
+        if (batchCount >= deleteBatchSize || (deleteBatchWaitMs && elapsed >= deleteBatchWaitMs)) {
           await deleteEvents(db, { changeId: { to: lastId } });
           batchCount = 0;
           lastDeleteTime = Date.now();

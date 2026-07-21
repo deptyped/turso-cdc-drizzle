@@ -6,6 +6,7 @@ import type { TursoDatabaseDatabase } from "drizzle-orm/tursodatabase";
 import { deleteEvents, disableCdc, enableCdc, getEvents, streamEvents, tursoCdc } from "../src/helpers.ts";
 import type { CheckpointStrategy } from "../src/types.js";
 import type { CdcEvent, ChangeId } from "../src/types.ts";
+import { CdcChangeKind, cdcChangeKindToInt } from "../src/types.ts";
 import { makeDb, t } from "./helpers.ts";
 
 type TursoCdcRow = InferSelectModel<typeof tursoCdc>;
@@ -25,7 +26,7 @@ test("enableCdc + disableCdc run without error and capture changes", async () =>
   await client.exec("INSERT INTO t(v) VALUES ('a')");
   await client.exec("INSERT INTO t(v) VALUES ('b')");
   const rows = await capture(db);
-  assert.ok(rows.some((r) => r.tableName === "t" && r.changeType === 1));
+  assert.ok(rows.some((r) => r.tableName === "t" && r.changeType === cdcChangeKindToInt(CdcChangeKind.INSERT)));
   await disableCdc(db);
   await client.close?.();
 });
@@ -66,10 +67,10 @@ test("getEvents beforeId returns only earlier changes", async () => {
   await client.exec("INSERT INTO t(v) VALUES ('b')");
   const all = await getEvents(db, t, { limit: 100 });
   assert.ok(all.length >= 2);
-  const cutoff = all[1].changeId;
+  const cutoff = all[1]!.changeId;
   const before = await getEvents(db, t, { beforeId: cutoff, limit: 100 });
   assert.equal(before.length, 1);
-  assert.equal(before[0].changeId, all[0].changeId);
+  assert.equal(before[0]!.changeId, all[0]!.changeId);
   await disableCdc(db);
   await client.close?.();
 });
@@ -124,7 +125,7 @@ test("deleteEvents date.from removes rows from a lower bound", async () => {
   const minTime = Math.min(...all.map((r) => r.changeTime ?? 0));
   await deleteEvents(db, { date: { from: minTime } });
   const remaining = await capture(db);
-  assert.equal(remaining.filter((r) => r.changeType !== 2).length, 0);
+  assert.equal(remaining.filter((r) => r.changeType !== cdcChangeKindToInt(CdcChangeKind.COMMIT)).length, 0);
   await disableCdc(db);
   await client.close?.();
 });
@@ -138,7 +139,7 @@ test("deleteEvents changeId.from removes rows from a lower bound", async () => {
   const minId = Math.min(...all.map((r) => r.changeId ?? 0));
   await deleteEvents(db, { changeId: { from: minId } });
   const remaining = await capture(db);
-  assert.equal(remaining.filter((r) => r.changeType !== 2).length, 0);
+  assert.equal(remaining.filter((r) => r.changeType !== cdcChangeKindToInt(CdcChangeKind.COMMIT)).length, 0);
   await disableCdc(db);
   await client.close?.();
 });
@@ -189,7 +190,7 @@ test("getEvents deleteAfterRead only deletes received events, not all", async ()
   assert.equal(events.length, 2);
   // only those 2 should be deleted — remaining 2 are untouched
   const remaining = await capture(db);
-  const dataRemaining = remaining.filter((r) => r.changeType !== 2);
+  const dataRemaining = remaining.filter((r) => r.changeType !== cdcChangeKindToInt(CdcChangeKind.COMMIT));
   assert.equal(dataRemaining.length, 2);
   await disableCdc(db);
   await client.close?.();
@@ -292,7 +293,7 @@ test("streamEvents deleteAfterRead only deletes consumed events", async () => {
 
   // only the first 2 events (consumed by stream) should be deleted
   const remaining = await capture(db);
-  const dataRemaining = remaining.filter((r) => r.changeType !== 2);
+  const dataRemaining = remaining.filter((r) => r.changeType !== cdcChangeKindToInt(CdcChangeKind.COMMIT));
   assert.equal(dataRemaining.length, 2);
   await disableCdc(db);
   await client.close?.();
@@ -322,7 +323,7 @@ test("streamEvents deleteAfterRead batched only deletes consumed events", async 
 
   // only the first 2 events (consumed by stream) should be deleted
   const remaining = await capture(db);
-  const dataRemaining = remaining.filter((r) => r.changeType !== 2);
+  const dataRemaining = remaining.filter((r) => r.changeType !== cdcChangeKindToInt(CdcChangeKind.COMMIT));
   assert.equal(dataRemaining.length, 2);
   await disableCdc(db);
   await client.close?.();
@@ -379,7 +380,7 @@ test("checkpoint.restore resumes stream from saved position", async () => {
 
   const lastId = all.at(-1)!.changeId;
   assert.ok(saved !== undefined);
-  assert.equal(saved, lastId);
+  assert.equal(saved!, lastId);
 
   await client.exec("INSERT INTO t(v) VALUES ('c')");
 
@@ -427,7 +428,7 @@ test("checkpoint.save fires on abort", async () => {
   }
 
   assert.ok(saved !== undefined);
-  assert.ok(saved > 0);
+  assert.ok(saved! > 0);
   await disableCdc(db);
   await client.close?.();
 });

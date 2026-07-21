@@ -36,6 +36,9 @@ export function cdcChangeKindToInt(kind: CdcChangeKind): number {
       return -1;
     case CdcChangeKind.COMMIT:
       return 2;
+    default:
+      kind satisfies never;
+      throw new Error(`Unhandled CdcChangeKind: ${kind}`);
   }
 }
 
