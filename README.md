@@ -76,23 +76,30 @@ for await (const event of streamEvents(db, users, { deleteAfterRead: true })) {
 }
 ```
 
-## Resilience
+## Stream lifecycle
 
-### Crash recovery with checkpoint
+### Resuming
 
 Use `CheckpointStrategy` to persist progress. The stream calls `restore` on start (if no `afterId` is given) and `save` after each batch is fully consumed. On abort, `save` fires one final time with the last yielded event's `changeId` before exit.
 
 ```ts
 import type { CheckpointStrategy } from '@deptyped/turso-cdc-drizzle';
-import { sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
+import { sqliteTable, text, int } from 'drizzle-orm/sqlite-core';
+
+const cdcState = sqliteTable('turso_cdc_state', {
+  key: text('key').primaryKey(),
+  value: int('value'),
+});
 
 const checkpoint: CheckpointStrategy = {
   save: async (changeId, db) => {
-    await db.run(sql.raw(`UPDATE _cdc_cp SET change_id = ${changeId}`));
+    await db.insert(cdcState).values({ key: 'lastChangeId', value: changeId })
+      .onConflictDoUpdate({ target: cdcState.key, set: { value: changeId } });
   },
   restore: async (db) => {
-    const row = await db.get(sql.raw("SELECT change_id FROM _cdc_cp"));
-    return row?.change_id;
+    const [row] = await db.select().from(cdcState).where(eq(cdcState.key, 'lastChangeId'));
+    return row?.value;
   },
 };
 
@@ -106,7 +113,7 @@ for await (const event of streamEvents(db, users, {
 
 `save` errors are silently caught — the stream continues and retries on the next batch.
 
-### Graceful shutdown
+### Stopping
 
 Pass an `AbortSignal` to stop the stream cleanly. A final checkpoint is saved before exit.
 
@@ -147,7 +154,7 @@ Returns `CdcEvent<TTable>[]`. COMMIT rows are filtered out automatically.
 | `table` | `TTable` | A Drizzle table definition |
 | `opts.afterId` | `ChangeId` | Exclusive lower bound (gt) — events after this id |
 | `opts.beforeId` | `ChangeId` | Exclusive upper bound (lt) — events before this id |
-| `opts.kinds` | `CdcChangeKind[]` | `['INSERT']` \| `['UPDATE']` \| `['DELETE']` |
+| `opts.kinds` | `CdcChangeKind[]` | Filter by change type — any of `'INSERT'`, `'UPDATE'`, `'DELETE'` |
 | `opts.mode` | `'id'` \| `'full'` | `'full'` decodes blob data into `before`/`after` |
 | `opts.deleteAfterRead` | `boolean` | Auto-delete returned events |
 | `opts.limit` | `number` | **Required.** Max events to return |
@@ -165,12 +172,12 @@ Returns `AsyncGenerator<CdcEvent<TTable>>`. Polls every `pollIntervalMs` (defaul
 | `opts.afterId` | `ChangeId` | — | Resume from a previous event |
 | `opts.beforeId` | `ChangeId` | — | Exclusive upper bound |
 | `opts.mode` | `'id'` \| `'full'` | `'id'` | `'full'` includes decoded blob data |
-| `opts.kinds` | `CdcChangeKind[]` | — | `['INSERT']` \| `['UPDATE']` \| `['DELETE']` |
+| `opts.kinds` | `CdcChangeKind[]` | — | Filter by change type — any of `'INSERT'`, `'UPDATE'`, `'DELETE'` |
 | `opts.deleteAfterRead` | `boolean` | — | Auto-delete events after yielding |
 | `opts.deleteBatchSize` | `number` | — | Batch delete every N events (requires `deleteAfterRead`) |
 | `opts.deleteBatchWaitMs` | `number` | — | Max wait before flushing a partial batch (requires `deleteBatchSize`) |
 | `opts.batchSize` | `number` | `100` | Max events per poll cycle. Also drives checkpoint cadence — checkpoint is saved after each batch. |
-| `opts.checkpoint` | `CheckpointStrategy` | — | Persistence strategy for crash recovery. See [Resilience](#resilience). |
+| `opts.checkpoint` | `CheckpointStrategy` | — | Persistence strategy for stream resumption. See [Stream lifecycle](#stream-lifecycle). |
 
 ### `deleteEvents(db, opts)`
 
